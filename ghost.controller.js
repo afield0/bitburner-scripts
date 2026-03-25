@@ -365,40 +365,29 @@ function allocateThreadsAcrossFleet(ns, hosts, script, target, neededThreads, ve
     const hostStates = hosts
         .map(host => buildHostState(ns, host, script, target, version, scriptRam, opts.reserveHomeRam))
         .sort((a, b) => b.capacity - a.capacity || a.host.localeCompare(b.host));
-
+    const desiredPlan = buildDistributedPlan(hostStates, neededThreads);
     const keepHosts = new Set();
-    let remainingThreads = neededThreads;
     let allocatedThreads = 0;
 
-    // First count already-correct workers so the controller behaves like a scheduler, not a reset loop.
     for (const state of hostStates) {
-        if (!state.correctProcess) continue;
+        const desiredThreads = desiredPlan.get(state.host) || 0;
 
-        const keptThreads = Math.min(state.currentThreads, remainingThreads);
-        if (keptThreads > 0) {
-            keepHosts.add(state.host);
-            allocatedThreads += keptThreads;
-            remainingThreads -= keptThreads;
+        if (desiredThreads < 1) {
+            killManagedWorkers(ns, state.host);
+            continue;
         }
-    }
 
-    // Then fill the gap with the largest free hosts until the requirement is satisfied.
-    for (const state of hostStates) {
-        if (remainingThreads <= 0) break;
-        if (keepHosts.has(state.host)) continue;
-
-        const allocatableThreads = state.correctProcess
-            ? 0
-            : Math.min(state.capacity, remainingThreads);
-
-        if (allocatableThreads < 1) continue;
+        if (canKeepExistingWorker(state, desiredThreads)) {
+            keepHosts.add(state.host);
+            allocatedThreads += state.currentThreads;
+            continue;
+        }
 
         replaceManagedWorkers(ns, state.host, script, target, version);
-        const pid = ns.exec(script, state.host, allocatableThreads, target, version);
+        const pid = ns.exec(script, state.host, desiredThreads, target, version);
         if (pid !== 0) {
             keepHosts.add(state.host);
-            allocatedThreads += allocatableThreads;
-            remainingThreads -= allocatableThreads;
+            allocatedThreads += desiredThreads;
         }
     }
 
@@ -428,8 +417,53 @@ function buildHostState(ns, host, script, target, version, scriptRam, reserveHom
         host,
         correctProcess,
         currentThreads,
+        hasConflicts,
         capacity: Math.max(0, capacity),
     };
+}
+
+function buildDistributedPlan(hostStates, neededThreads) {
+    const usableHosts = hostStates.filter(state => state.capacity > 0);
+    const plan = new Map();
+    let remainingThreads = neededThreads;
+
+    for (let i = 0; i < usableHosts.length; i++) {
+        const state = usableHosts[i];
+        const hostsLeft = usableHosts.length - i;
+        const fairShare = Math.max(1, Math.ceil(remainingThreads / hostsLeft));
+        const assignedThreads = Math.min(state.capacity, fairShare, remainingThreads);
+
+        if (assignedThreads > 0) {
+            plan.set(state.host, assignedThreads);
+            remainingThreads -= assignedThreads;
+        }
+
+        if (remainingThreads <= 0) {
+            break;
+        }
+    }
+
+    if (remainingThreads > 0) {
+        for (const state of usableHosts) {
+            if (remainingThreads <= 0) break;
+
+            const currentAssigned = plan.get(state.host) || 0;
+            const extraCapacity = state.capacity - currentAssigned;
+            if (extraCapacity <= 0) continue;
+
+            const extraThreads = Math.min(extraCapacity, remainingThreads);
+            plan.set(state.host, currentAssigned + extraThreads);
+            remainingThreads -= extraThreads;
+        }
+    }
+
+    return plan;
+}
+
+function canKeepExistingWorker(state, desiredThreads) {
+    return Boolean(state.correctProcess) &&
+        !state.hasConflicts &&
+        state.currentThreads === desiredThreads;
 }
 
 function clearUnneededWorkers(ns, hosts, script, target, version, keepHosts) {
