@@ -4,6 +4,8 @@ import {
     ALL_SCRIPTS,
     DECOMMISSION_FILE,
     SHARE_ENABLE_FILE,
+    SILENT_ENABLE_FILE,
+    XP_ENABLE_FILE,
     RESERVED_HOME_RAM,
     SECURITY_BUFFER,
     MONEY_THRESHOLD,
@@ -28,7 +30,10 @@ export async function main(ns) {
         return;
     }
 
+    let cycle = 0;
+
     while (true) {
+        cycle += 1;
         const network = discoverNetwork(ns, "home");
         const rooted = [];
 
@@ -43,25 +48,29 @@ export async function main(ns) {
 
         const decommissionedHosts = getDecommissionedHosts(ns);
         const schedulableHosts = rooted.filter(host => !decommissionedHosts.has(host));
+        const silent = shouldSilenceOutput(ns);
+        const xpMode = shouldPrioritizeXp(ns);
+        const verboseThisCycle = Boolean(flags.verbose) && !silent && cycle % 3 === 1;
 
         const targets = flags.target
             ? [String(flags.target)]
-            : getCandidateTargets(ns, network);
+            : getCandidateTargets(ns, network, xpMode);
 
         if (targets.length === 0) {
-            if (flags.verbose) {
+            if (verboseThisCycle) {
                 ns.tprint(`[GHOST ${VERSION}] No suitable target found. The studio is dark.`);
             }
         } else {
             const result = scheduleFleet(ns, schedulableHosts, targets, {
-                verbose: Boolean(flags.verbose),
+                verbose: verboseThisCycle,
                 reserveHomeRam: Number(flags["reserve-home-ram"]),
                 hackPercent: Number(flags["hack-percent"]),
+                xpMode,
             });
 
-            if (flags.verbose) {
+            if (verboseThisCycle) {
                 ns.tprint(
-                    `[GHOST ${VERSION}] Broadcast complete. rooted=${rooted.length} schedulable=${schedulableHosts.length} decomm=${decommissionedHosts.size} targets=${result.summaries.length} allocated=${result.totalAllocatedThreads}`
+                    `[GHOST ${VERSION}] Broadcast complete. rooted=${rooted.length} schedulable=${schedulableHosts.length} decomm=${decommissionedHosts.size} targets=${result.summaries.length} allocated=${result.totalAllocatedThreads} goal=${xpMode ? "xp" : "money"}`
                 );
             }
         }
@@ -136,6 +145,14 @@ function getDecommissionedHosts(ns) {
             .map(line => line.trim())
             .filter(Boolean)
     );
+}
+
+function shouldSilenceOutput(ns) {
+    return ns.fileExists(SILENT_ENABLE_FILE, "home");
+}
+
+function shouldPrioritizeXp(ns) {
+    return ns.fileExists(XP_ENABLE_FILE, "home");
 }
 
 function discoverNetwork(ns, start) {
@@ -227,7 +244,7 @@ function isManagedScript(filename) {
     return filename === "ghost.controller.js" || WORKER_SCRIPTS.includes(filename);
 }
 
-function getCandidateTargets(ns, hosts) {
+function getCandidateTargets(ns, hosts, xpMode) {
     const candidates = hosts.filter(host => {
         if (host === "home") return false;
         if (!ns.hasRootAccess(host)) return false;
@@ -236,25 +253,43 @@ function getCandidateTargets(ns, hosts) {
         return true;
     });
 
-    candidates.sort((a, b) => scoreTarget(ns, b) - scoreTarget(ns, a));
+    candidates.sort((a, b) => scoreTarget(ns, b, xpMode) - scoreTarget(ns, a, xpMode));
     return candidates;
 }
 
-function scoreTarget(ns, host) {
+function scoreTarget(ns, host, xpMode) {
+    if (xpMode) {
+        return scoreTargetForXp(ns, host);
+    }
+
     const maxMoney = ns.getServerMaxMoney(host);
     const minSec = ns.getServerMinSecurityLevel(host);
     const chance = ns.hackAnalyzeChance ? ns.hackAnalyzeChance(host) : 1;
     return (maxMoney * chance) / Math.max(1, minSec);
 }
 
-function getModePriority(mode) {
+function scoreTargetForXp(ns, host) {
+    const reqLevel = Math.max(1, ns.getServerRequiredHackingLevel(host));
+    const playerLevel = Math.max(1, ns.getHackingLevel());
+    const time = Math.max(1, ns.getWeakenTime(host));
+    const levelFit = Math.min(1, reqLevel / playerLevel);
+    return (levelFit * reqLevel) / time;
+}
+
+function getModePriority(mode, xpMode) {
+    if (xpMode) {
+        if (mode === "weaken") return 3;
+        if (mode === "grow") return 2;
+        return 1;
+    }
+
     if (mode === "hack") return 3;
     if (mode === "grow") return 2;
     return 1;
 }
 
 function scheduleFleet(ns, rootedHosts, targets, opts) {
-    const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent);
+    const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent, opts.xpMode);
     const result = allocateTargetsAcrossFleet(ns, rootedHosts, targetPlans, VERSION, opts);
     result.shareEnabled = shouldRunSharing(ns);
 
@@ -368,7 +403,7 @@ function getNeededHackThreads(ns, target, hackFraction) {
     }
 }
 
-function buildTargetPlans(ns, targets, hackPercent) {
+function buildTargetPlans(ns, targets, hackPercent, xpMode) {
     const seen = new Set();
     const plans = [];
 
@@ -387,8 +422,8 @@ function buildTargetPlans(ns, targets, hackPercent) {
             mode,
             script,
             neededThreads,
-            modePriority: getModePriority(mode),
-            score: scoreTarget(ns, target),
+            modePriority: getModePriority(mode, xpMode),
+            score: scoreTarget(ns, target, xpMode),
             actionTime: getActionTime(ns, target, mode),
             security: ns.getServerSecurityLevel(target),
             minSecurity: ns.getServerMinSecurityLevel(target),

@@ -1,5 +1,6 @@
 import {
     DECOMMISSION_FILE,
+    SILENT_ENABLE_FILE,
     WORKER_SCRIPTS
 } from "ghost.config.js";
 
@@ -27,16 +28,17 @@ export async function main(ns) {
     const verbose = Boolean(flags.verbose);
 
     while (true) {
+        const silent = shouldSilenceOutput(ns);
         const result = managePurchasedServers(ns, {
             prefix,
             reserveCash,
             pauseSpareRatio,
             pauseSpareGb,
             spendRatio,
-            verbose,
+            verbose: verbose && !silent,
         });
 
-        if (verbose && result.action === "idle") {
+        if (verbose && !silent && result.action === "idle") {
             ns.tprint(`[PSERV] Holding pattern. purchased=${result.count}/${result.limit} cash=${formatMoney(ns, result.cash)} next=${result.nextAction}`);
         }
 
@@ -81,7 +83,9 @@ function managePurchasedServers(ns, opts) {
         const host = ns.purchaseServer(name, ram);
 
         if (host) {
-            ns.tprint(`[PSERV] New hull commissioned. host=${host} ram=${formatRam(ram)} cost=${formatMoney(ns, cost)} fleet=${purchased.length + 1}/${limit}`);
+            if (opts.verbose) {
+                ns.tprint(`[PSERV] New hull commissioned. host=${host} ram=${formatRam(ram)} cost=${formatMoney(ns, cost)} fleet=${purchased.length + 1}/${limit}`);
+            }
             return { action: "purchase", count: purchased.length + 1, limit, cash: cash - cost };
         }
 
@@ -134,12 +138,16 @@ function managePurchasedServers(ns, opts) {
         const newHost = ns.purchaseServer(draining, upgradeRam);
         if (newHost) {
             writeDecommissionedHosts(ns, removeDecommissionedHost(decommissioned, draining));
-            ns.tprint(`[PSERV] Hull refit complete. host=${newHost} ram=${formatRam(upgradeRam)} cost=${formatMoney(ns, cost)}`);
+            if (opts.verbose) {
+                ns.tprint(`[PSERV] Hull refit complete. host=${newHost} ram=${formatRam(upgradeRam)} cost=${formatMoney(ns, cost)}`);
+            }
             return { action: "upgrade", count: purchased.length, limit, cash: cash - cost };
         }
 
         writeDecommissionedHosts(ns, removeDecommissionedHost(decommissioned, draining));
-        ns.tprint(`[PSERV] Refit failure. host=${draining} targetRam=${formatRam(upgradeRam)} drydock is empty.`);
+        if (opts.verbose) {
+            ns.tprint(`[PSERV] Refit failure. host=${draining} targetRam=${formatRam(upgradeRam)} drydock is empty.`);
+        }
         return { action: "idle", count: purchased.length - 1, limit, cash, nextAction: "manual intervention needed" };
     }
 
@@ -168,7 +176,9 @@ function managePurchasedServers(ns, opts) {
     }
 
     writeDecommissionedHosts(ns, addDecommissionedHost(decommissioned, upgrade.host));
-    ns.tprint(`[PSERV] Decommission beacon lit. host=${upgrade.host} current=${formatRam(upgrade.currentRam)} target=${formatRam(upgrade.newRam)} waiting for workers to clear.`);
+    if (opts.verbose) {
+        ns.tprint(`[PSERV] Decommission beacon lit. host=${upgrade.host} current=${formatRam(upgrade.currentRam)} target=${formatRam(upgrade.newRam)} waiting for workers to clear.`);
+    }
     return {
         action: "decommission",
         count: purchased.length,
@@ -334,6 +344,7 @@ function disableLogs(ns) {
         "getPurchasedServerMaxRam",
         "getServerMaxRam",
         "getServerUsedRam",
+        "fileExists",
         "purchaseServer",
         "deleteServer",
         "killall",
@@ -342,6 +353,10 @@ function disableLogs(ns) {
         "write",
         "rm",
     ].forEach(fn => ns.disableLog(fn));
+}
+
+function shouldSilenceOutput(ns) {
+    return ns.fileExists(SILENT_ENABLE_FILE, "home");
 }
 
 function getDecommissionedHosts(ns, purchased) {
