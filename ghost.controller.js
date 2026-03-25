@@ -70,6 +70,7 @@ function disableLogs(ns) {
         "kill",
         "fileExists",
         "getServerRequiredHackingLevel",
+        "getHackingLevel",
         "getServerNumPortsRequired",
         "hasRootAccess",
         "getServerMoneyAvailable",
@@ -151,14 +152,21 @@ async function ensureScripts(ns, host) {
 }
 
 function killOldVersions(ns, host) {
+    const currentPid = ns.pid;
+
     for (const proc of ns.ps(host)) {
         if (!isManagedScript(proc.filename)) continue;
+        if (proc.pid === currentPid) continue;
 
         const procVersion = proc.args.length > 1
             ? String(proc.args[1])
             : proc.filename === "ghost.controller.js" && proc.args.length > 0
                 ? String(proc.args[0])
                 : "unknown";
+
+        if (proc.filename === "ghost.controller.js" && procVersion === "unknown") {
+            continue;
+        }
 
         if (procVersion !== VERSION) {
             ns.kill(proc.pid);
