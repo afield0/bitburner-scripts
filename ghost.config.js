@@ -1,4 +1,4 @@
-export const VERSION = "1.0.4";
+export const VERSION = "1.0.5";
 
 export const WORKER_SCRIPTS = [
     "ghost.hack.js",

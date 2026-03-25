@@ -227,6 +227,12 @@ function scoreTarget(ns, host) {
     return (maxMoney * chance) / Math.max(1, minSec);
 }
 
+function getModePriority(mode) {
+    if (mode === "hack") return 3;
+    if (mode === "grow") return 2;
+    return 1;
+}
+
 function scheduleFleet(ns, rootedHosts, targets, opts) {
     const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent);
     const result = allocateTargetsAcrossFleet(ns, rootedHosts, targetPlans, VERSION, opts);
@@ -350,6 +356,7 @@ function buildTargetPlans(ns, targets, hackPercent) {
             mode,
             script,
             neededThreads,
+            modePriority: getModePriority(mode),
             score: scoreTarget(ns, target),
             actionTime: getActionTime(ns, target, mode),
             security: ns.getServerSecurityLevel(target),
@@ -359,7 +366,12 @@ function buildTargetPlans(ns, targets, hackPercent) {
         });
     }
 
-    return plans.sort((a, b) => b.score - a.score);
+    return plans.sort((a, b) =>
+        b.modePriority - a.modePriority ||
+        b.score - a.score ||
+        a.actionTime - b.actionTime ||
+        a.target.localeCompare(b.target)
+    );
 }
 
 function allocateTargetsAcrossFleet(ns, hosts, targetPlans, version, opts) {
