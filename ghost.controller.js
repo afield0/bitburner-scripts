@@ -22,6 +22,10 @@ export async function main(ns) {
 
     disableLogs(ns);
 
+    if (!ensureSingleController(ns)) {
+        return;
+    }
+
     while (true) {
         const network = discoverNetwork(ns, "home");
         const rooted = [];
@@ -58,6 +62,29 @@ export async function main(ns) {
         if (flags.once) return;
         await ns.sleep(Number(flags.interval));
     }
+}
+
+function ensureSingleController(ns) {
+    const controllers = ns.ps("home")
+        .filter(proc => proc.filename === "ghost.controller.js")
+        .sort((a, b) => a.pid - b.pid);
+    const keeper = controllers[0] || null;
+
+    if (!keeper) {
+        return true;
+    }
+
+    if (keeper.pid !== ns.pid) {
+        ns.tprint(`[GHOST ${VERSION}] Another bridge captain already holds the console. keeperPid=${keeper.pid} exitingPid=${ns.pid}`);
+        return false;
+    }
+
+    for (const proc of controllers) {
+        if (proc.pid === ns.pid) continue;
+        ns.kill(proc.pid);
+    }
+
+    return true;
 }
 
 function disableLogs(ns) {
