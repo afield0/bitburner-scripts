@@ -3,6 +3,7 @@ import {
     WORKER_SCRIPTS,
     ALL_SCRIPTS,
     DECOMMISSION_FILE,
+    SHARE_ENABLE_FILE,
     RESERVED_HOME_RAM,
     SECURITY_BUFFER,
     MONEY_THRESHOLD,
@@ -119,6 +120,7 @@ function disableLogs(ns) {
         "getWeakenTime",
         "getGrowTime",
         "getHackTime",
+        "share",
         "read",
     ].forEach(fn => ns.disableLog(fn));
 }
@@ -254,12 +256,23 @@ function getModePriority(mode) {
 function scheduleFleet(ns, rootedHosts, targets, opts) {
     const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent);
     const result = allocateTargetsAcrossFleet(ns, rootedHosts, targetPlans, VERSION, opts);
+    result.shareEnabled = shouldRunSharing(ns);
+
+    if (result.shareEnabled) {
+        result.shareThreads = allocateSharingAcrossFleet(ns, rootedHosts, result.availableRam, result.desiredAssignments, VERSION);
+    } else {
+        result.shareThreads = 0;
+    }
 
     if (opts.verbose) {
         for (const summary of result.summaries) {
             ns.tprint(
                 `[GHOST ${VERSION}] Signal locked. target=${summary.target} mode=${summary.mode} needed=${summary.neededThreads} allocated=${summary.allocatedThreads} leftover=${summary.leftoverThreads} eta=${formatDuration(ns, summary.actionTime)} sec=${summary.security.toFixed(2)}/${summary.minSecurity.toFixed(2)} money=${formatMoney(ns, summary.money)}/${formatMoney(ns, summary.maxMoney)}`
             );
+        }
+
+        if (result.shareEnabled) {
+            ns.tprint(`[GHOST ${VERSION}] Chorus online. mode=share allocated=${result.shareThreads} file=${SHARE_ENABLE_FILE}`);
         }
     }
 
@@ -423,7 +436,40 @@ function allocateTargetsAcrossFleet(ns, hosts, targetPlans, version, opts) {
 
     reconcileFleetAssignments(ns, hostOrder, desiredAssignments);
 
-    return { summaries, totalAllocatedThreads };
+    return { summaries, totalAllocatedThreads, availableRam, desiredAssignments };
+}
+
+function shouldRunSharing(ns) {
+    return ns.fileExists(SHARE_ENABLE_FILE, "home");
+}
+
+function allocateSharingAcrossFleet(ns, hosts, availableRam, desiredAssignments, version) {
+    const script = "ghost.share.js";
+    const scriptRam = ns.getScriptRam(script, "home");
+    if (scriptRam <= 0) {
+        return 0;
+    }
+
+    let totalThreads = 0;
+
+    for (const host of hosts) {
+        const freeRam = availableRam.get(host) || 0;
+        const threads = Math.max(0, Math.floor(freeRam / scriptRam));
+        if (threads < 1) continue;
+
+        desiredAssignments.get(host).push({
+            script,
+            target: "share",
+            version,
+            threads,
+        });
+        totalThreads += threads;
+        availableRam.set(host, Math.max(0, freeRam - (threads * scriptRam)));
+    }
+
+    reconcileFleetAssignments(ns, hosts, desiredAssignments);
+
+    return totalThreads;
 }
 
 function allocatePlanAcrossHosts(ns, hostOrder, availableRam, plan) {
