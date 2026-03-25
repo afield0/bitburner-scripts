@@ -1,3 +1,8 @@
+import {
+    DECOMMISSION_FILE,
+    WORKER_SCRIPTS
+} from "ghost.config.js";
+
 /** @param {NS} ns **/
 export async function main(ns) {
     const flags = ns.flags([
@@ -40,6 +45,7 @@ function managePurchasedServers(ns, opts) {
     const maxRam = ns.getPurchasedServerMaxRam();
     const cash = ns.getServerMoneyAvailable("home");
     const budget = Math.max(0, (cash - opts.reserveCash) * opts.spendRatio);
+    const decommissioned = getDecommissionedHosts(ns, purchased);
 
     if (purchased.length < limit) {
         const ram = getFillPurchaseRam(ns, budget, maxRam);
@@ -71,7 +77,56 @@ function managePurchasedServers(ns, opts) {
         };
     }
 
-    const upgrade = chooseUpgrade(ns, purchased, budget, maxRam);
+    const draining = getDrainingUpgrade(ns, purchased, decommissioned);
+    if (draining) {
+        const activeWorkers = countManagedWorkers(ns, draining);
+        if (activeWorkers > 0) {
+            return {
+                action: "idle",
+                count: purchased.length,
+                limit,
+                cash,
+                nextAction: `waiting for ${draining} to drain workers=${activeWorkers}`,
+            };
+        }
+
+        const upgradeRam = getUpgradeTargetRam(ns, ns.getServerMaxRam(draining), budget, maxRam);
+        if (upgradeRam === 0) {
+            writeDecommissionedHosts(ns, removeDecommissionedHost(decommissioned, draining));
+            return {
+                action: "idle",
+                count: purchased.length,
+                limit,
+                cash,
+                nextAction: `budget slipped below upgrade target for ${draining}`,
+            };
+        }
+
+        ns.killall(draining);
+        if (!ns.deleteServer(draining)) {
+            return {
+                action: "idle",
+                count: purchased.length,
+                limit,
+                cash,
+                nextAction: `delete failed for ${draining}`,
+            };
+        }
+
+        const cost = ns.getPurchasedServerCost(upgradeRam);
+        const newHost = ns.purchaseServer(draining, upgradeRam);
+        if (newHost) {
+            writeDecommissionedHosts(ns, removeDecommissionedHost(decommissioned, draining));
+            ns.tprint(`[PSERV] Hull refit complete. host=${newHost} ram=${formatRam(upgradeRam)} cost=${formatMoney(ns, cost)}`);
+            return { action: "upgrade", count: purchased.length, limit, cash: cash - cost };
+        }
+
+        writeDecommissionedHosts(ns, removeDecommissionedHost(decommissioned, draining));
+        ns.tprint(`[PSERV] Refit failure. host=${draining} targetRam=${formatRam(upgradeRam)} drydock is empty.`);
+        return { action: "idle", count: purchased.length - 1, limit, cash, nextAction: "manual intervention needed" };
+    }
+
+    const upgrade = chooseUpgrade(ns, purchased, budget, maxRam, decommissioned);
     if (!upgrade) {
         const nextCost = getNextUpgradeCost(ns, purchased, maxRam);
         return {
@@ -85,25 +140,15 @@ function managePurchasedServers(ns, opts) {
         };
     }
 
-    ns.killall(upgrade.host);
-    if (!ns.deleteServer(upgrade.host)) {
-        return {
-            action: "idle",
-            count: purchased.length,
-            limit,
-            cash,
-            nextAction: `delete failed for ${upgrade.host}`,
-        };
-    }
-
-    const newHost = ns.purchaseServer(upgrade.host, upgrade.newRam);
-    if (newHost) {
-        ns.tprint(`[PSERV] Hull refit complete. host=${newHost} ram=${formatRam(upgrade.currentRam)}->${formatRam(upgrade.newRam)} cost=${formatMoney(ns, upgrade.cost)}`);
-        return { action: "upgrade", count: purchased.length, limit, cash: cash - upgrade.cost };
-    }
-
-    ns.tprint(`[PSERV] Refit failure. host=${upgrade.host} targetRam=${formatRam(upgrade.newRam)} drydock is empty.`);
-    return { action: "idle", count: purchased.length - 1, limit, cash, nextAction: "manual intervention needed" };
+    writeDecommissionedHosts(ns, addDecommissionedHost(decommissioned, upgrade.host));
+    ns.tprint(`[PSERV] Decommission beacon lit. host=${upgrade.host} current=${formatRam(upgrade.currentRam)} target=${formatRam(upgrade.newRam)} waiting for workers to clear.`);
+    return {
+        action: "decommission",
+        count: purchased.length,
+        limit,
+        cash,
+        nextAction: `draining ${upgrade.host} for upgrade`,
+    };
 }
 
 function getFillPurchaseRam(ns, budget, maxRam) {
@@ -123,8 +168,9 @@ function getFillPurchaseRam(ns, budget, maxRam) {
     return best;
 }
 
-function chooseUpgrade(ns, purchased, budget, maxRam) {
+function chooseUpgrade(ns, purchased, budget, maxRam, decommissioned) {
     const servers = purchased
+        .filter(host => !decommissioned.has(host))
         .map(host => ({ host, ram: ns.getServerMaxRam(host) }))
         .sort((a, b) => a.ram - b.ram || a.host.localeCompare(b.host));
 
@@ -176,6 +222,25 @@ function chooseUpgrade(ns, purchased, budget, maxRam) {
     return best;
 }
 
+function getUpgradeTargetRam(ns, currentRam, budget, maxRam) {
+    if (currentRam >= maxRam) return 0;
+
+    let candidateRam = currentRam * 2;
+    let bestAffordable = 0;
+
+    while (candidateRam <= maxRam) {
+        const cost = ns.getPurchasedServerCost(candidateRam);
+        if (cost <= budget) {
+            bestAffordable = candidateRam;
+            candidateRam *= 2;
+            continue;
+        }
+        break;
+    }
+
+    return bestAffordable;
+}
+
 function getNextUpgradeCost(ns, purchased, maxRam) {
     let cheapest = 0;
 
@@ -220,7 +285,67 @@ function disableLogs(ns) {
         "purchaseServer",
         "deleteServer",
         "killall",
+        "ps",
+        "read",
+        "write",
+        "rm",
     ].forEach(fn => ns.disableLog(fn));
+}
+
+function getDecommissionedHosts(ns, purchased) {
+    if (!ns.fileExists(DECOMMISSION_FILE, "home")) {
+        return new Set();
+    }
+
+    const purchasedSet = new Set(purchased);
+    const hosts = new Set(
+        ns.read(DECOMMISSION_FILE)
+            .split("\n")
+            .map(line => line.trim())
+            .filter(host => host && purchasedSet.has(host))
+    );
+
+    writeDecommissionedHosts(ns, hosts);
+    return hosts;
+}
+
+function writeDecommissionedHosts(ns, hosts) {
+    const lines = [...hosts].sort();
+    if (lines.length === 0) {
+        if (ns.fileExists(DECOMMISSION_FILE, "home")) {
+            ns.rm(DECOMMISSION_FILE, "home");
+        }
+        return;
+    }
+
+    ns.write(DECOMMISSION_FILE, `${lines.join("\n")}\n`, "w");
+}
+
+function addDecommissionedHost(hosts, host) {
+    const next = new Set(hosts);
+    next.add(host);
+    return next;
+}
+
+function removeDecommissionedHost(hosts, host) {
+    const next = new Set(hosts);
+    next.delete(host);
+    return next;
+}
+
+function getDrainingUpgrade(ns, purchased, decommissioned) {
+    for (const host of purchased.sort()) {
+        if (decommissioned.has(host)) {
+            return host;
+        }
+    }
+    return null;
+}
+
+function countManagedWorkers(ns, host) {
+    return ns.ps(host)
+        .filter(proc => WORKER_SCRIPTS.includes(proc.filename))
+        .reduce((sum, proc) => sum + (Number(proc.threads) || 0), 0);
 }
 
 function clampNumber(value, min, max, fallback) {

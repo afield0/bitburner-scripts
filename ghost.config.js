@@ -1,4 +1,4 @@
-export const VERSION = "1.0.5";
+export const VERSION = "1.0.6";
 
 export const WORKER_SCRIPTS = [
     "ghost.hack.js",
@@ -12,6 +12,8 @@ export const ALL_SCRIPTS = [
     "ghost.report.js",
     ...WORKER_SCRIPTS,
 ];
+
+export const DECOMMISSION_FILE = "ghost.decommission.txt";
 
 export const RESERVED_HOME_RAM = 32;
 

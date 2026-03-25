@@ -2,6 +2,7 @@ import {
     VERSION,
     WORKER_SCRIPTS,
     ALL_SCRIPTS,
+    DECOMMISSION_FILE,
     RESERVED_HOME_RAM,
     SECURITY_BUFFER,
     MONEY_THRESHOLD,
@@ -39,6 +40,9 @@ export async function main(ns) {
             }
         }
 
+        const decommissionedHosts = getDecommissionedHosts(ns);
+        const schedulableHosts = rooted.filter(host => !decommissionedHosts.has(host));
+
         const targets = flags.target
             ? [String(flags.target)]
             : getCandidateTargets(ns, network);
@@ -48,7 +52,7 @@ export async function main(ns) {
                 ns.tprint(`[GHOST ${VERSION}] No suitable target found. The studio is dark.`);
             }
         } else {
-            const result = scheduleFleet(ns, rooted, targets, {
+            const result = scheduleFleet(ns, schedulableHosts, targets, {
                 verbose: Boolean(flags.verbose),
                 reserveHomeRam: Number(flags["reserve-home-ram"]),
                 hackPercent: Number(flags["hack-percent"]),
@@ -56,7 +60,7 @@ export async function main(ns) {
 
             if (flags.verbose) {
                 ns.tprint(
-                    `[GHOST ${VERSION}] Broadcast complete. rooted=${rooted.length} targets=${result.summaries.length} allocated=${result.totalAllocatedThreads}`
+                    `[GHOST ${VERSION}] Broadcast complete. rooted=${rooted.length} schedulable=${schedulableHosts.length} decomm=${decommissionedHosts.size} targets=${result.summaries.length} allocated=${result.totalAllocatedThreads}`
                 );
             }
         }
@@ -115,7 +119,21 @@ function disableLogs(ns) {
         "getWeakenTime",
         "getGrowTime",
         "getHackTime",
+        "read",
     ].forEach(fn => ns.disableLog(fn));
+}
+
+function getDecommissionedHosts(ns) {
+    if (!ns.fileExists(DECOMMISSION_FILE, "home")) {
+        return new Set();
+    }
+
+    return new Set(
+        ns.read(DECOMMISSION_FILE)
+            .split("\n")
+            .map(line => line.trim())
+            .filter(Boolean)
+    );
 }
 
 function discoverNetwork(ns, start) {
