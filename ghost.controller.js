@@ -39,24 +39,26 @@ export async function main(ns) {
             }
         }
 
-        const target = flags.target
-            ? String(flags.target)
-            : pickBestTarget(ns, network);
+        const targets = flags.target
+            ? [String(flags.target)]
+            : getCandidateTargets(ns, network);
 
-        if (!target) {
+        if (targets.length === 0) {
             if (flags.verbose) {
                 ns.tprint(`[GHOST ${VERSION}] No suitable target found. The studio is dark.`);
             }
         } else {
-            scheduleFleet(ns, rooted, target, {
+            const result = scheduleFleet(ns, rooted, targets, {
                 verbose: Boolean(flags.verbose),
                 reserveHomeRam: Number(flags["reserve-home-ram"]),
                 hackPercent: Number(flags["hack-percent"]),
             });
-        }
 
-        if (flags.verbose) {
-            ns.tprint(`[GHOST ${VERSION}] Broadcast complete. rooted=${rooted.length} target=${target || "none"}`);
+            if (flags.verbose) {
+                ns.tprint(
+                    `[GHOST ${VERSION}] Broadcast complete. rooted=${rooted.length} targets=${result.summaries.length} allocated=${result.totalAllocatedThreads}`
+                );
+            }
         }
 
         if (flags.once) return;
@@ -205,7 +207,7 @@ function isManagedScript(filename) {
     return filename === "ghost.controller.js" || WORKER_SCRIPTS.includes(filename);
 }
 
-function pickBestTarget(ns, hosts) {
+function getCandidateTargets(ns, hosts) {
     const candidates = hosts.filter(host => {
         if (host === "home") return false;
         if (!ns.hasRootAccess(host)) return false;
@@ -215,7 +217,7 @@ function pickBestTarget(ns, hosts) {
     });
 
     candidates.sort((a, b) => scoreTarget(ns, b) - scoreTarget(ns, a));
-    return candidates[0] || null;
+    return candidates;
 }
 
 function scoreTarget(ns, host) {
@@ -225,31 +227,19 @@ function scoreTarget(ns, host) {
     return (maxMoney * chance) / Math.max(1, minSec);
 }
 
-function scheduleFleet(ns, rootedHosts, target, opts) {
-    const mode = selectMode(ns, target);
-    const script = getWorkerScript(mode);
-    const neededThreads = getNeededThreadsForMode(ns, target, mode, opts.hackPercent);
-    const allocated = allocateThreadsAcrossFleet(
-        ns,
-        rootedHosts,
-        script,
-        target,
-        neededThreads,
-        VERSION,
-        opts
-    );
-    const actionTime = getActionTime(ns, target, mode);
-    const security = ns.getServerSecurityLevel(target);
-    const minSecurity = ns.getServerMinSecurityLevel(target);
-    const money = ns.getServerMoneyAvailable(target);
-    const maxMoney = ns.getServerMaxMoney(target);
-    const leftover = Math.max(0, neededThreads - allocated.allocatedThreads);
+function scheduleFleet(ns, rootedHosts, targets, opts) {
+    const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent);
+    const result = allocateTargetsAcrossFleet(ns, rootedHosts, targetPlans, VERSION, opts);
 
     if (opts.verbose) {
-        ns.tprint(
-            `[GHOST ${VERSION}] Signal locked. target=${target} mode=${mode} needed=${neededThreads} allocated=${allocated.allocatedThreads} leftover=${leftover} eta=${formatDuration(ns, actionTime)} sec=${security.toFixed(2)}/${minSecurity.toFixed(2)} money=${formatMoney(ns, money)}/${formatMoney(ns, maxMoney)}`
-        );
+        for (const summary of result.summaries) {
+            ns.tprint(
+                `[GHOST ${VERSION}] Signal locked. target=${summary.target} mode=${summary.mode} needed=${summary.neededThreads} allocated=${summary.allocatedThreads} leftover=${summary.leftoverThreads} eta=${formatDuration(ns, summary.actionTime)} sec=${summary.security.toFixed(2)}/${summary.minSecurity.toFixed(2)} money=${formatMoney(ns, summary.money)}/${formatMoney(ns, summary.maxMoney)}`
+            );
+        }
     }
+
+    return result;
 }
 
 function selectMode(ns, target) {
@@ -341,85 +331,93 @@ function getNeededHackThreads(ns, target, hackFraction) {
     }
 }
 
-function getAvailableThreads(ns, host, scriptRam, reserveHomeRam) {
-    if (scriptRam <= 0) return 0;
+function buildTargetPlans(ns, targets, hackPercent) {
+    const seen = new Set();
+    const plans = [];
 
-    const maxRam = ns.getServerMaxRam(host);
-    const usedRam = ns.getServerUsedRam(host);
-    let usableRam = maxRam - usedRam;
+    for (const target of targets) {
+        if (!target || seen.has(target)) continue;
+        seen.add(target);
 
-    if (host === "home") {
-        usableRam -= reserveHomeRam;
+        const mode = selectMode(ns, target);
+        const script = getWorkerScript(mode);
+        const neededThreads = getNeededThreadsForMode(ns, target, mode, hackPercent);
+
+        if (neededThreads < 1) continue;
+
+        plans.push({
+            target,
+            mode,
+            script,
+            neededThreads,
+            score: scoreTarget(ns, target),
+            actionTime: getActionTime(ns, target, mode),
+            security: ns.getServerSecurityLevel(target),
+            minSecurity: ns.getServerMinSecurityLevel(target),
+            money: ns.getServerMoneyAvailable(target),
+            maxMoney: ns.getServerMaxMoney(target),
+        });
     }
 
-    return Math.max(0, Math.floor(usableRam / scriptRam));
+    return plans.sort((a, b) => b.score - a.score);
 }
 
-function allocateThreadsAcrossFleet(ns, hosts, script, target, neededThreads, version, opts) {
-    const scriptRam = ns.getScriptRam(script, "home");
-    if (scriptRam <= 0 || neededThreads <= 0) {
-        clearUnneededWorkers(ns, hosts, script, target, version, new Set());
-        return { allocatedThreads: 0 };
+function allocateTargetsAcrossFleet(ns, hosts, targetPlans, version, opts) {
+    const hostOrder = hosts
+        .slice()
+        .sort((a, b) => getFleetCapacityRam(ns, b, opts.reserveHomeRam) - getFleetCapacityRam(ns, a, opts.reserveHomeRam) || a.localeCompare(b));
+    const availableRam = new Map(hostOrder.map(host => [host, getFleetCapacityRam(ns, host, opts.reserveHomeRam)]));
+    const desiredAssignments = new Map(hostOrder.map(host => [host, []]));
+    const summaries = [];
+    let totalAllocatedThreads = 0;
+
+    for (const plan of targetPlans) {
+        const distribution = allocatePlanAcrossHosts(ns, hostOrder, availableRam, plan);
+
+        for (const [host, threads] of distribution.hostThreads.entries()) {
+            desiredAssignments.get(host).push({
+                script: plan.script,
+                target: plan.target,
+                version,
+                threads,
+            });
+        }
+
+        summaries.push({
+            ...plan,
+            allocatedThreads: distribution.allocatedThreads,
+            leftoverThreads: Math.max(0, plan.neededThreads - distribution.allocatedThreads),
+        });
+        totalAllocatedThreads += distribution.allocatedThreads;
     }
 
-    const hostStates = hosts
-        .map(host => buildHostState(ns, host, script, target, version, scriptRam, opts.reserveHomeRam))
+    reconcileFleetAssignments(ns, hostOrder, desiredAssignments);
+
+    return { summaries, totalAllocatedThreads };
+}
+
+function allocatePlanAcrossHosts(ns, hostOrder, availableRam, plan) {
+    const scriptRam = ns.getScriptRam(plan.script, "home");
+    if (scriptRam <= 0 || plan.neededThreads <= 0) {
+        return { allocatedThreads: 0, hostThreads: new Map() };
+    }
+
+    const hostStates = hostOrder
+        .map(host => ({
+            host,
+            capacity: Math.max(0, Math.floor((availableRam.get(host) || 0) / scriptRam)),
+        }))
+        .filter(state => state.capacity > 0)
         .sort((a, b) => b.capacity - a.capacity || a.host.localeCompare(b.host));
-    const desiredPlan = buildDistributedPlan(hostStates, neededThreads);
-    const keepHosts = new Set();
+    const desiredPlan = buildDistributedPlan(hostStates, plan.neededThreads);
     let allocatedThreads = 0;
 
-    for (const state of hostStates) {
-        const desiredThreads = desiredPlan.get(state.host) || 0;
-
-        if (desiredThreads < 1) {
-            killManagedWorkers(ns, state.host);
-            continue;
-        }
-
-        if (canKeepExistingWorker(state, desiredThreads)) {
-            keepHosts.add(state.host);
-            allocatedThreads += state.currentThreads;
-            continue;
-        }
-
-        replaceManagedWorkers(ns, state.host, script, target, version);
-        const pid = ns.exec(script, state.host, desiredThreads, target, version);
-        if (pid !== 0) {
-            keepHosts.add(state.host);
-            allocatedThreads += desiredThreads;
-        }
+    for (const [host, threads] of desiredPlan.entries()) {
+        allocatedThreads += threads;
+        availableRam.set(host, Math.max(0, (availableRam.get(host) || 0) - (threads * scriptRam)));
     }
 
-    clearUnneededWorkers(ns, hosts, script, target, version, keepHosts);
-
-    return { allocatedThreads };
-}
-
-function buildHostState(ns, host, script, target, version, scriptRam, reserveHomeRam) {
-    const processes = ns.ps(host).filter(proc => WORKER_SCRIPTS.includes(proc.filename));
-    const correctProcess = processes.find(proc =>
-        proc.filename === script &&
-        String(proc.args[0] || "") === target &&
-        String(proc.args[1] || "") === version
-    ) || null;
-    const otherManaged = processes.filter(proc => !correctProcess || proc.pid !== correctProcess.pid);
-    const availableThreads = getAvailableThreads(ns, host, scriptRam, reserveHomeRam);
-    const currentThreads = correctProcess ? Math.max(0, Number(correctProcess.threads) || 0) : 0;
-    const hasConflicts = otherManaged.length > 0;
-    const capacity = currentThreads > 0
-        ? currentThreads + availableThreads
-        : hasConflicts
-            ? Math.floor((getManagedFreeableRam(ns, host) + getFreeRam(ns, host, reserveHomeRam)) / scriptRam)
-            : availableThreads;
-
-    return {
-        host,
-        correctProcess,
-        currentThreads,
-        hasConflicts,
-        capacity: Math.max(0, capacity),
-    };
+    return { allocatedThreads, hostThreads: desiredPlan };
 }
 
 function buildDistributedPlan(hostStates, neededThreads) {
@@ -460,47 +458,49 @@ function buildDistributedPlan(hostStates, neededThreads) {
     return plan;
 }
 
-function canKeepExistingWorker(state, desiredThreads) {
-    return Boolean(state.correctProcess) &&
-        !state.hasConflicts &&
-        state.currentThreads === desiredThreads;
+function reconcileFleetAssignments(ns, hosts, desiredAssignments) {
+    for (const host of hosts) {
+        reconcileHostAssignments(ns, host, desiredAssignments.get(host) || []);
+    }
 }
 
-function clearUnneededWorkers(ns, hosts, script, target, version, keepHosts) {
-    for (const host of hosts) {
-        if (keepHosts.has(host)) {
-            killConflictingWorkers(ns, host, script, target, version);
+function reconcileHostAssignments(ns, host, desired) {
+    const existing = ns.ps(host).filter(proc => WORKER_SCRIPTS.includes(proc.filename));
+    const desiredByKey = new Map();
+
+    for (const assignment of desired) {
+        desiredByKey.set(makeAssignmentKey(assignment), assignment);
+    }
+
+    for (const proc of existing) {
+        const assignment = {
+            script: proc.filename,
+            target: String(proc.args[0] || ""),
+            version: String(proc.args[1] || ""),
+            threads: Number(proc.threads) || 0,
+        };
+        const key = makeAssignmentKey(assignment);
+
+        if (desiredByKey.has(key)) {
+            desiredByKey.delete(key);
             continue;
         }
 
-        killManagedWorkers(ns, host);
+        ns.kill(proc.pid);
+    }
+
+    for (const assignment of desiredByKey.values()) {
+        ns.exec(assignment.script, host, assignment.threads, assignment.target, assignment.version);
     }
 }
 
-function replaceManagedWorkers(ns, host, script, target, version) {
-    killManagedWorkers(ns, host);
-}
-
-function killConflictingWorkers(ns, host, script, target, version) {
-    for (const proc of ns.ps(host)) {
-        if (!WORKER_SCRIPTS.includes(proc.filename)) continue;
-
-        const matches = proc.filename === script &&
-            String(proc.args[0] || "") === target &&
-            String(proc.args[1] || "") === version;
-
-        if (!matches) {
-            ns.kill(proc.pid);
-        }
-    }
-}
-
-function killManagedWorkers(ns, host) {
-    for (const proc of ns.ps(host)) {
-        if (WORKER_SCRIPTS.includes(proc.filename)) {
-            ns.kill(proc.pid);
-        }
-    }
+function makeAssignmentKey(assignment) {
+    return [
+        assignment.script,
+        assignment.target,
+        assignment.version,
+        String(assignment.threads),
+    ].join("|");
 }
 
 function getManagedFreeableRam(ns, host) {
@@ -510,6 +510,10 @@ function getManagedFreeableRam(ns, host) {
         ram += ns.getScriptRam(proc.filename, host) * (Number(proc.threads) || 0);
     }
     return ram;
+}
+
+function getFleetCapacityRam(ns, host, reserveHomeRam) {
+    return getFreeRam(ns, host, reserveHomeRam) + getManagedFreeableRam(ns, host);
 }
 
 function getFreeRam(ns, host, reserveHomeRam) {
