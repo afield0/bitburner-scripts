@@ -10,6 +10,8 @@ export async function main(ns) {
         ["once", false],
         ["prefix", "shade"],
         ["reserve-cash", 0],
+        ["pause-spare-ratio", 0.25],
+        ["pause-spare-gb", 0],
         ["spend-ratio", 1],
         ["verbose", true],
     ]);
@@ -18,6 +20,8 @@ export async function main(ns) {
 
     const prefix = String(flags.prefix || "shade");
     const reserveCash = Math.max(0, Number(flags["reserve-cash"]) || 0);
+    const pauseSpareRatio = clampNumber(flags["pause-spare-ratio"], 0, 1, 0.25);
+    const pauseSpareGb = Math.max(0, Number(flags["pause-spare-gb"]) || 0);
     const spendRatio = clampNumber(flags["spend-ratio"], 0.01, 1, 1);
     const interval = Math.max(1000, Number(flags.interval) || 30000);
     const verbose = Boolean(flags.verbose);
@@ -26,6 +30,8 @@ export async function main(ns) {
         const result = managePurchasedServers(ns, {
             prefix,
             reserveCash,
+            pauseSpareRatio,
+            pauseSpareGb,
             spendRatio,
             verbose,
         });
@@ -46,8 +52,19 @@ function managePurchasedServers(ns, opts) {
     const cash = ns.getServerMoneyAvailable("home");
     const budget = Math.max(0, (cash - opts.reserveCash) * opts.spendRatio);
     const decommissioned = getDecommissionedHosts(ns, purchased);
+    const spareCapacity = getPurchasedFleetSpareCapacity(ns, purchased, decommissioned);
 
     if (purchased.length < limit) {
+        if (shouldPausePurchasing(spareCapacity, opts)) {
+            return {
+                action: "idle",
+                count: purchased.length,
+                limit,
+                cash,
+                nextAction: `spare capacity high free=${formatRam(spareCapacity.freeRam)} total=${formatRam(spareCapacity.totalRam)}`,
+            };
+        }
+
         const ram = getFillPurchaseRam(ns, budget, maxRam);
         if (ram === 0) {
             return {
@@ -124,6 +141,16 @@ function managePurchasedServers(ns, opts) {
         writeDecommissionedHosts(ns, removeDecommissionedHost(decommissioned, draining));
         ns.tprint(`[PSERV] Refit failure. host=${draining} targetRam=${formatRam(upgradeRam)} drydock is empty.`);
         return { action: "idle", count: purchased.length - 1, limit, cash, nextAction: "manual intervention needed" };
+    }
+
+    if (shouldPausePurchasing(spareCapacity, opts)) {
+        return {
+            action: "idle",
+            count: purchased.length,
+            limit,
+            cash,
+            nextAction: `spare capacity high free=${formatRam(spareCapacity.freeRam)} total=${formatRam(spareCapacity.totalRam)}`,
+        };
     }
 
     const upgrade = chooseUpgrade(ns, purchased, budget, maxRam, decommissioned);
@@ -258,6 +285,30 @@ function getNextUpgradeCost(ns, purchased, maxRam) {
     return cheapest;
 }
 
+function getPurchasedFleetSpareCapacity(ns, purchased, decommissioned) {
+    let totalRam = 0;
+    let freeRam = 0;
+
+    for (const host of purchased) {
+        if (decommissioned.has(host)) continue;
+        const maxRam = ns.getServerMaxRam(host);
+        const usedRam = ns.getServerUsedRam(host);
+        totalRam += maxRam;
+        freeRam += Math.max(0, maxRam - usedRam);
+    }
+
+    return { totalRam, freeRam };
+}
+
+function shouldPausePurchasing(spareCapacity, opts) {
+    if (spareCapacity.totalRam <= 0) {
+        return false;
+    }
+
+    const freeRatio = spareCapacity.freeRam / spareCapacity.totalRam;
+    return freeRatio >= opts.pauseSpareRatio && spareCapacity.freeRam >= opts.pauseSpareGb;
+}
+
 function nextPurchasedServerName(prefix, purchased, limit) {
     const used = new Set(purchased);
     for (let i = 0; i < limit; i++) {
@@ -282,6 +333,7 @@ function disableLogs(ns) {
         "getPurchasedServerLimit",
         "getPurchasedServerMaxRam",
         "getServerMaxRam",
+        "getServerUsedRam",
         "purchaseServer",
         "deleteServer",
         "killall",
