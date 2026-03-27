@@ -51,6 +51,7 @@ The XP mode is controlled by `ghost.xp.enabled.txt`. When present, the controlle
 - `ghost.report.js`: shows available fleet RAM and active ghost assignments.
 - `ghost.chart.js`: maps network targets, showing hackability, prep state, money, security, and optional connection paths.
 - `ghost.route.js`: prints the connection path from `home` to a target server, with an optional `connect` command chain.
+- `ghost.trophies.js`: attempts low-effort achievements by creating helper scripts, buying the first hacknet node, and using Singularity actions when available.
 
 Run it with:
 
@@ -60,6 +61,8 @@ run ghost.chart.js --all
 run ghost.chart.js --paths --sort depth
 run ghost.route.js --target run4theh111z
 run ghost.route.js --target CSEC --cmd
+run ghost.trophies.js
+run ghost.trophies.js --dry-run
 ```
 
 Supported flags:
@@ -69,6 +72,9 @@ Supported flags:
 - `--sort <score|depth|req|money|ram|name>`: sort the listing.
 - `ghost.route.js --target <host>`: resolve a single target path.
 - `ghost.route.js --cmd`: also print a `connect ...;` command chain for terminal use.
+- `ghost.trophies.js --dry-run`: show what achievement actions would be attempted without spending money or writing files.
+- `ghost.trophies.js --folder <dir>`: choose where achievement helper scripts are written.
+- `ghost.trophies.js --force-files`: rewrite the helper files even if they already exist.
 
 ## Purchased server automation
 
