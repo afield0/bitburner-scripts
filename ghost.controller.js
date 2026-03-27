@@ -21,7 +21,7 @@ export async function main(ns) {
         ["interval", CONTROLLER_INTERVAL],
         ["once", false],
         ["target", ""],
-        ["verbose", true],
+        ["verbose", "true"],
         ["reserve-home-ram", RESERVED_HOME_RAM],
         ["hack-percent", HACK_MONEY_FRACTION],
         ["max-targets", 0],

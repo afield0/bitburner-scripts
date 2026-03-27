@@ -11,7 +11,7 @@ export async function main(ns) {
         ["sell-forecast", 0.55],
         ["min-volatility", 0],
         ["max-holdings", 5],
-        ["verbose", true],
+        ["verbose", "true"],
     ]);
 
     disableLogs(ns);

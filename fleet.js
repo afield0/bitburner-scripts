@@ -14,7 +14,7 @@ export async function main(ns) {
         ["pause-spare-ratio", 0.25],
         ["pause-spare-gb", 0],
         ["spend-ratio", 1],
-        ["verbose", true],
+        ["verbose", "true"],
     ]);
 
     disableLogs(ns);

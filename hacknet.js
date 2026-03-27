@@ -5,7 +5,7 @@ export async function main(ns) {
         ["once", false],
         ["spend-ratio", 1],
         ["max-nodes", 999],
-        ["verbose", true],
+        ["verbose", "true"],
     ]);
 
     disableLogs(ns);
