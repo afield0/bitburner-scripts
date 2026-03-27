@@ -305,12 +305,11 @@ function getModePriority(mode, xpMode) {
 
 function scheduleFleet(ns, rootedHosts, targets, opts) {
     const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent, opts.xpMode);
-    const existingThreadsByKey = getExistingManagedThreadsByKey(ns, rootedHosts, VERSION);
-    const result = allocateTargetsAcrossFleet(ns, rootedHosts, targetPlans, VERSION, opts, existingThreadsByKey);
+    const result = allocateTargetsAcrossFleet(ns, rootedHosts, targetPlans, VERSION, opts);
     result.shareEnabled = shouldRunSharing(ns);
 
     if (result.shareEnabled) {
-        result.shareThreads = allocateSharingAcrossFleet(ns, rootedHosts, result.availableRam, result.desiredAssignments, VERSION, existingThreadsByKey);
+        result.shareThreads = allocateSharingAcrossFleet(ns, rootedHosts, result.availableRam, result.desiredAssignments, VERSION);
     } else {
         result.shareThreads = 0;
     }
@@ -497,7 +496,7 @@ function getWeakenSupportThreads(ns, target, mode, primaryThreads) {
     return Math.ceil(securityIncrease / weakenPerThread);
 }
 
-function allocateTargetsAcrossFleet(ns, hosts, targetPlans, version, opts, existingThreadsByKey) {
+function allocateTargetsAcrossFleet(ns, hosts, targetPlans, version, opts) {
     const hostOrder = hosts
         .slice()
         .sort((a, b) => getFreeRam(ns, b, opts.reserveHomeRam) - getFreeRam(ns, a, opts.reserveHomeRam) || a.localeCompare(b));
@@ -507,13 +506,8 @@ function allocateTargetsAcrossFleet(ns, hosts, targetPlans, version, opts, exist
     let totalAllocatedThreads = 0;
 
     for (const plan of targetPlans) {
-        const planKey = makeAssignmentGroupKey({
-            script: plan.script,
-            target: plan.target,
-            version,
-        });
-        const existingThreads = existingThreadsByKey.get(planKey) || 0;
-        const remainingNeededThreads = Math.max(0, plan.neededThreads - existingThreads);
+        const existingEffectUnits = getExistingPlanEquivalentUnits(ns, hostOrder, plan, version);
+        const remainingNeededThreads = Math.max(0, plan.neededThreads - existingEffectUnits);
         const plannedWork = {
             ...plan,
             neededThreads: remainingNeededThreads,
@@ -531,7 +525,7 @@ function allocateTargetsAcrossFleet(ns, hosts, targetPlans, version, opts, exist
 
         summaries.push({
             ...plan,
-            existingThreads,
+            existingThreads: existingEffectUnits,
             allocatedThreads: distribution.allocatedThreads,
             leftoverThreads: Math.max(0, remainingNeededThreads - distribution.allocatedThreads),
         });
@@ -547,28 +541,18 @@ function shouldRunSharing(ns) {
     return ns.fileExists(SHARE_ENABLE_FILE, "home");
 }
 
-function allocateSharingAcrossFleet(ns, hosts, availableRam, desiredAssignments, version, existingThreadsByKey) {
+function allocateSharingAcrossFleet(ns, hosts, availableRam, desiredAssignments, version) {
     const script = "ghost.share.js";
     const scriptRam = ns.getScriptRam(script, "home");
     if (scriptRam <= 0) {
         return 0;
     }
 
-    const existingKey = makeAssignmentGroupKey({
-        script,
-        target: "share",
-        version,
-    });
-    let remainingExistingThreads = existingThreadsByKey.get(existingKey) || 0;
     let totalThreads = 0;
 
     for (const host of hosts) {
-        const existingShareThreads = getRunningAssignmentThreads(ns, host, script, "share", version);
         const freeRam = availableRam.get(host) || 0;
-        const freeThreads = Math.max(0, Math.floor(freeRam / scriptRam));
-        const coveredByExisting = Math.min(existingShareThreads, remainingExistingThreads);
-        remainingExistingThreads = Math.max(0, remainingExistingThreads - coveredByExisting);
-        const threads = Math.max(0, freeThreads);
+        const threads = Math.max(0, Math.floor(freeRam / scriptRam));
         if (threads < 1) continue;
 
         desiredAssignments.get(host).push({
@@ -596,9 +580,14 @@ function allocatePlanAcrossHosts(ns, hostOrder, availableRam, plan) {
         .map(host => ({
             host,
             capacity: Math.max(0, Math.floor((availableRam.get(host) || 0) / scriptRam)),
+            effectPerThread: getPlanThreadEffectUnits(ns, host, plan),
         }))
-        .filter(state => state.capacity > 0)
-        .sort((a, b) => b.capacity - a.capacity || a.host.localeCompare(b.host));
+        .filter(state => state.capacity > 0 && state.effectPerThread > 0)
+        .sort((a, b) =>
+            (b.capacity * b.effectPerThread) - (a.capacity * a.effectPerThread) ||
+            b.effectPerThread - a.effectPerThread ||
+            a.host.localeCompare(b.host)
+        );
     const desiredPlan = buildDistributedPlan(hostStates, plan.neededThreads);
     let allocatedThreads = 0;
 
@@ -613,35 +602,40 @@ function allocatePlanAcrossHosts(ns, hostOrder, availableRam, plan) {
 function buildDistributedPlan(hostStates, neededThreads) {
     const usableHosts = hostStates.filter(state => state.capacity > 0);
     const plan = new Map();
-    let remainingThreads = neededThreads;
+    let remainingUnits = neededThreads;
 
     for (let i = 0; i < usableHosts.length; i++) {
         const state = usableHosts[i];
-        const hostsLeft = usableHosts.length - i;
-        const fairShare = Math.max(1, Math.ceil(remainingThreads / hostsLeft));
-        const assignedThreads = Math.min(state.capacity, fairShare, remainingThreads);
+        const maxUnits = state.capacity * state.effectPerThread;
+        const assignedThreads = Math.min(
+            state.capacity,
+            Math.max(1, Math.ceil(remainingUnits / state.effectPerThread))
+        );
 
-        if (assignedThreads > 0) {
+        if (assignedThreads > 0 && maxUnits > 0) {
             plan.set(state.host, assignedThreads);
-            remainingThreads -= assignedThreads;
+            remainingUnits = Math.max(0, remainingUnits - (assignedThreads * state.effectPerThread));
         }
 
-        if (remainingThreads <= 0) {
+        if (remainingUnits <= 0) {
             break;
         }
     }
 
-    if (remainingThreads > 0) {
+    if (remainingUnits > 0) {
         for (const state of usableHosts) {
-            if (remainingThreads <= 0) break;
+            if (remainingUnits <= 0) break;
 
             const currentAssigned = plan.get(state.host) || 0;
             const extraCapacity = state.capacity - currentAssigned;
             if (extraCapacity <= 0) continue;
 
-            const extraThreads = Math.min(extraCapacity, remainingThreads);
+            const extraThreads = Math.min(
+                extraCapacity,
+                Math.max(1, Math.ceil(remainingUnits / state.effectPerThread))
+            );
             plan.set(state.host, currentAssigned + extraThreads);
-            remainingThreads -= extraThreads;
+            remainingUnits = Math.max(0, remainingUnits - (extraThreads * state.effectPerThread));
         }
     }
 
@@ -691,35 +685,18 @@ function makeAssignmentGroupKey(assignment) {
     ].join("|");
 }
 
-function getExistingManagedThreadsByKey(ns, hosts, version) {
-    const threadsByKey = new Map();
-
+function getExistingPlanEquivalentUnits(ns, hosts, plan, version) {
+    let units = 0;
     for (const host of hosts) {
         for (const proc of ns.ps(host)) {
             if (!WORKER_SCRIPTS.includes(proc.filename)) continue;
             if (String(proc.args[1] || "") !== version) continue;
-
-            const key = makeAssignmentGroupKey({
-                script: proc.filename,
-                target: String(proc.args[0] || ""),
-                version,
-            });
-            threadsByKey.set(key, (threadsByKey.get(key) || 0) + (Number(proc.threads) || 0));
+            if (proc.filename !== plan.script) continue;
+            if (String(proc.args[0] || "") !== plan.target) continue;
+            units += (Number(proc.threads) || 0) * getPlanThreadEffectUnits(ns, host, plan);
         }
     }
-
-    return threadsByKey;
-}
-
-function getRunningAssignmentThreads(ns, host, script, target, version) {
-    let threads = 0;
-    for (const proc of ns.ps(host)) {
-        if (proc.filename !== script) continue;
-        if (String(proc.args[0] || "") !== target) continue;
-        if (String(proc.args[1] || "") !== version) continue;
-        threads += Number(proc.threads) || 0;
-    }
-    return threads;
+    return units;
 }
 
 function getFreeRam(ns, host, reserveHomeRam) {
@@ -734,6 +711,55 @@ function getActionTime(ns, target, mode) {
     if (mode === "weaken") return ns.getWeakenTime(target);
     if (mode === "grow") return ns.getGrowTime(target);
     return ns.getHackTime(target);
+}
+
+function getPlanThreadEffectUnits(ns, host, plan) {
+    if (plan.mode === "hack") {
+        return 1;
+    }
+
+    const cores = getHostCpuCores(ns, host);
+    if (plan.mode === "weaken") {
+        const baseWeaken = Math.max(0, ns.weakenAnalyze(1, 1));
+        const hostWeaken = Math.max(0, ns.weakenAnalyze(1, cores));
+        return baseWeaken > 0 ? hostWeaken / baseWeaken : 1;
+    }
+
+    if (plan.mode === "grow") {
+        const multiplier = getGrowMultiplier(ns, plan.target);
+        if (multiplier <= 1) {
+            return 1;
+        }
+
+        try {
+            const baseThreads = ns.growthAnalyze(plan.target, multiplier, 1);
+            const hostThreads = ns.growthAnalyze(plan.target, multiplier, cores);
+            if (Number.isFinite(baseThreads) && Number.isFinite(hostThreads) && baseThreads > 0 && hostThreads > 0) {
+                return baseThreads / hostThreads;
+            }
+        } catch {}
+    }
+
+    return 1;
+}
+
+function getHostCpuCores(ns, host) {
+    try {
+        const server = ns.getServer(host);
+        return Math.max(1, Number(server.cpuCores) || 1);
+    } catch {
+        return 1;
+    }
+}
+
+function getGrowMultiplier(ns, target) {
+    const currentMoney = ns.getServerMoneyAvailable(target);
+    const maxMoney = ns.getServerMaxMoney(target);
+    if (maxMoney <= 0 || currentMoney >= maxMoney) {
+        return 1;
+    }
+
+    return Math.max(1, maxMoney / Math.max(1, currentMoney));
 }
 
 function sanitizeThreadCount(value) {
