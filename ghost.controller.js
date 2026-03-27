@@ -57,7 +57,7 @@ export async function main(ns) {
 
         const targets = flags.target
             ? [String(flags.target)]
-            : getCandidateTargets(ns, network, xpMode, Number(flags["max-targets"]));
+            : getCandidateTargets(ns, network, xpMode);
 
         if (targets.length === 0) {
             if (verboseThisCycle) {
@@ -69,6 +69,7 @@ export async function main(ns) {
                 reserveHomeRam: Number(flags["reserve-home-ram"]),
                 hackPercent: Number(flags["hack-percent"]),
                 xpMode,
+                maxTargets: Number(flags["max-targets"]),
             });
 
             if (verboseThisCycle) {
@@ -249,7 +250,7 @@ function isManagedScript(filename) {
     return filename === "ghost.controller.js" || WORKER_SCRIPTS.includes(filename);
 }
 
-function getCandidateTargets(ns, hosts, xpMode, maxTargets) {
+function getCandidateTargets(ns, hosts, xpMode) {
     const candidates = hosts.filter(host => {
         if (host === "home") return false;
         if (!ns.hasRootAccess(host)) return false;
@@ -259,8 +260,7 @@ function getCandidateTargets(ns, hosts, xpMode, maxTargets) {
     });
 
     candidates.sort((a, b) => scoreTarget(ns, b, xpMode) - scoreTarget(ns, a, xpMode));
-    const limit = getTargetLimit(xpMode, maxTargets);
-    return limit > 0 ? candidates.slice(0, limit) : candidates;
+    return candidates;
 }
 
 function scoreTarget(ns, host, xpMode) {
@@ -304,7 +304,7 @@ function getModePriority(mode, xpMode) {
 }
 
 function scheduleFleet(ns, rootedHosts, targets, opts) {
-    const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent, opts.xpMode);
+    const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent, opts.xpMode, opts.maxTargets);
     const result = allocateTargetsAcrossFleet(ns, rootedHosts, targetPlans, VERSION, opts);
     result.shareEnabled = shouldRunSharing(ns);
 
@@ -418,13 +418,17 @@ function getNeededHackThreads(ns, target, hackFraction) {
     }
 }
 
-function buildTargetPlans(ns, targets, hackPercent, xpMode) {
+function buildTargetPlans(ns, targets, hackPercent, xpMode, maxTargets) {
     const seen = new Set();
     const plans = [];
+    const primaryTargetLimit = getTargetLimit(xpMode, maxTargets);
+    let targetIndex = 0;
 
     for (const target of targets) {
         if (!target || seen.has(target)) continue;
         seen.add(target);
+        const isPrimaryTarget = primaryTargetLimit <= 0 || targetIndex < primaryTargetLimit;
+        targetIndex += 1;
 
         const mode = selectMode(ns, target);
         const script = getWorkerScript(mode);
@@ -433,7 +437,7 @@ function buildTargetPlans(ns, targets, hackPercent, xpMode) {
         if (neededThreads < 1) continue;
 
         const score = scoreTarget(ns, target, xpMode);
-        const primaryPriority = getModePriority(mode, xpMode);
+        const primaryPriority = getModePriority(mode, xpMode) + (isPrimaryTarget ? 100 : 0);
         const weakenSupportThreads = getWeakenSupportThreads(ns, target, mode, neededThreads);
 
         if (weakenSupportThreads > 0) {
