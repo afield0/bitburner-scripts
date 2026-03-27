@@ -153,7 +153,7 @@ function getHacknetGenerated(ns) {
 
 function getHacknetSpent(ns) {
     try {
-        return ns.getMoneySources().sinceInstall.hacknet_expenses;
+        return Math.abs(ns.getMoneySources().sinceInstall.hacknet_expenses);
     } catch {
         return 0;
     }
