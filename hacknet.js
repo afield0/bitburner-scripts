@@ -14,7 +14,7 @@ export async function main(ns) {
         interval: Math.max(1000, Number(flags.interval) || 30000),
         spendRatio: clampNumber(flags["spend-ratio"], 0.01, 1, 1),
         maxNodes: Math.max(0, Math.floor(Number(flags["max-nodes"]) || 999)),
-        verbose: Boolean(flags.verbose),
+        verbose: parseBooleanFlag(flags.verbose, true),
     };
 
     while (true) {
@@ -202,6 +202,15 @@ function clampNumber(value, min, max, fallback) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return fallback;
     return Math.min(max, Math.max(min, numeric));
+}
+
+function parseBooleanFlag(value, fallback) {
+    if (typeof value === "boolean") return value;
+
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (raw === "true" || raw === "1" || raw === "yes" || raw === "on") return true;
+    if (raw === "false" || raw === "0" || raw === "no" || raw === "off") return false;
+    return fallback;
 }
 
 function disableLogs(ns) {

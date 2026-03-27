@@ -28,7 +28,7 @@ export async function main(ns) {
         sellForecast: clampNumber(flags["sell-forecast"], 0.5, 0.99, 0.55),
         minVolatility: Math.max(0, Number(flags["min-volatility"]) || 0),
         maxHoldings: Math.max(1, Math.floor(Number(flags["max-holdings"]) || 5)),
-        verbose: Boolean(flags.verbose),
+        verbose: parseBooleanFlag(flags.verbose, true),
     };
 
     if (options.sellForecast >= options.buyForecast) {
@@ -202,6 +202,15 @@ function clampNumber(value, min, max, fallback) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return fallback;
     return Math.min(max, Math.max(min, numeric));
+}
+
+function parseBooleanFlag(value, fallback) {
+    if (typeof value === "boolean") return value;
+
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (raw === "true" || raw === "1" || raw === "yes" || raw === "on") return true;
+    if (raw === "false" || raw === "0" || raw === "no" || raw === "off") return false;
+    return fallback;
 }
 
 function parseMoneyInput(value, fallback) {

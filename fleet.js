@@ -25,7 +25,7 @@ export async function main(ns) {
     const pauseSpareGb = Math.max(0, Number(flags["pause-spare-gb"]) || 0);
     const spendRatio = clampNumber(flags["spend-ratio"], 0.01, 1, 1);
     const interval = Math.max(1000, Number(flags.interval) || 30000);
-    const verbose = Boolean(flags.verbose);
+    const verbose = parseBooleanFlag(flags.verbose, true);
 
     while (true) {
         const silent = shouldSilenceOutput(ns);
@@ -445,6 +445,15 @@ function parseMoneyInput(value, fallback) {
     };
 
     return numeric * (multipliers[suffix] || 1);
+}
+
+function parseBooleanFlag(value, fallback) {
+    if (typeof value === "boolean") return value;
+
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (raw === "true" || raw === "1" || raw === "yes" || raw === "on") return true;
+    if (raw === "false" || raw === "0" || raw === "no" || raw === "off") return false;
+    return fallback;
 }
 
 function formatMoney(ns, amount) {
