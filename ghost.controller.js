@@ -53,11 +53,12 @@ export async function main(ns) {
         const schedulableHosts = rooted.filter(host => !decommissionedHosts.has(host));
         const silent = shouldSilenceOutput(ns);
         const xpMode = shouldPrioritizeXp(ns);
+        const planner = detectPlanner(ns);
         const verboseThisCycle = Boolean(flags.verbose) && !silent && cycle % 3 === 1;
 
         const targets = flags.target
             ? [String(flags.target)]
-            : getCandidateTargets(ns, network, xpMode);
+            : getCandidateTargets(ns, network, xpMode, planner);
 
         if (targets.length === 0) {
             if (verboseThisCycle) {
@@ -70,11 +71,12 @@ export async function main(ns) {
                 hackPercent: Number(flags["hack-percent"]),
                 xpMode,
                 maxTargets: Number(flags["max-targets"]),
+                planner,
             });
 
             if (verboseThisCycle) {
                 ns.tprint(
-                    `[GHOST ${VERSION}] Broadcast complete. rooted=${rooted.length} schedulable=${schedulableHosts.length} decomm=${decommissionedHosts.size} targets=${result.summaries.length} allocated=${result.totalAllocatedThreads} goal=${xpMode ? "xp" : "money"}`
+                    `[GHOST ${VERSION}] Broadcast complete. rooted=${rooted.length} schedulable=${schedulableHosts.length} decomm=${decommissionedHosts.size} targets=${result.summaries.length} allocated=${result.totalAllocatedThreads} goal=${xpMode ? "xp" : "money"} planner=${planner}`
                 );
             }
         }
@@ -126,6 +128,8 @@ function disableLogs(ns) {
         "getServerMinSecurityLevel",
         "getServerMaxRam",
         "getServerUsedRam",
+        "getServer",
+        "getPlayer",
         "getScriptRam",
         "weakenAnalyze",
         "growthAnalyze",
@@ -159,6 +163,14 @@ function shouldSilenceOutput(ns) {
 
 function shouldPrioritizeXp(ns) {
     return ns.fileExists(XP_ENABLE_FILE, "home");
+}
+
+function detectPlanner(ns) {
+    return hasFormulasAccess(ns) ? "formulas" : "basic";
+}
+
+function hasFormulasAccess(ns) {
+    return ns.fileExists("Formulas.exe", "home") && Boolean(ns.formulas?.hacking);
 }
 
 function discoverNetwork(ns, start) {
@@ -250,7 +262,7 @@ function isManagedScript(filename) {
     return filename === "ghost.controller.js" || WORKER_SCRIPTS.includes(filename);
 }
 
-function getCandidateTargets(ns, hosts, xpMode) {
+function getCandidateTargets(ns, hosts, xpMode, planner) {
     const candidates = hosts.filter(host => {
         if (host === "home") return false;
         if (!ns.hasRootAccess(host)) return false;
@@ -259,13 +271,19 @@ function getCandidateTargets(ns, hosts, xpMode) {
         return true;
     });
 
-    candidates.sort((a, b) => scoreTarget(ns, b, xpMode) - scoreTarget(ns, a, xpMode));
+    candidates.sort((a, b) => scoreTarget(ns, b, xpMode, planner) - scoreTarget(ns, a, xpMode, planner));
     return candidates;
 }
 
-function scoreTarget(ns, host, xpMode) {
+function scoreTarget(ns, host, xpMode, planner) {
     if (xpMode) {
-        return scoreTargetForXp(ns, host);
+        return planner === "formulas"
+            ? scoreTargetForXpFormulas(ns, host)
+            : scoreTargetForXp(ns, host);
+    }
+
+    if (planner === "formulas") {
+        return scoreTargetForMoneyFormulas(ns, host);
     }
 
     const maxMoney = ns.getServerMaxMoney(host);
@@ -280,6 +298,60 @@ function scoreTargetForXp(ns, host) {
     const time = Math.max(1, ns.getWeakenTime(host));
     const levelFit = Math.min(1, reqLevel / playerLevel);
     return (levelFit * reqLevel) / time;
+}
+
+function scoreTargetForXpFormulas(ns, host) {
+    try {
+        const player = ns.getPlayer();
+        const current = ns.getServer(host);
+        const prepped = getPreppedServer(ns, host);
+        const currentExp = Math.max(0, ns.formulas.hacking.hackExp(current, player));
+        const preppedExp = Math.max(0, ns.formulas.hacking.hackExp(prepped, player));
+        const currentTime = Math.max(1, ns.formulas.hacking.weakenTime(current, player));
+        const preppedTime = Math.max(1, ns.formulas.hacking.weakenTime(prepped, player));
+        return Math.max(currentExp / currentTime, preppedExp / preppedTime);
+    } catch {
+        return scoreTargetForXp(ns, host);
+    }
+}
+
+function scoreTargetForMoneyFormulas(ns, host) {
+    try {
+        const player = ns.getPlayer();
+        const current = ns.getServer(host);
+        const prepped = getPreppedServer(ns, host);
+        const currentScore = getFormulaMoneyRate(ns, current, player);
+        const preppedScore = getFormulaMoneyRate(ns, prepped, player);
+        const prepRatio = getPrepReadiness(current);
+        return Math.max(currentScore, preppedScore * (0.25 + (0.75 * prepRatio)));
+    } catch {
+        return scoreTarget(ns, host, false, "basic");
+    }
+}
+
+function getFormulaMoneyRate(ns, server, player) {
+    const chance = Math.max(0, ns.formulas.hacking.hackChance(server, player));
+    const percent = Math.max(0, ns.formulas.hacking.hackPercent(server, player));
+    const time = Math.max(1, ns.formulas.hacking.hackTime(server, player));
+    const money = Math.max(0, Number(server.moneyAvailable) || 0);
+    return (money * chance * percent) / time;
+}
+
+function getPrepReadiness(server) {
+    const moneyMax = Math.max(1, Number(server.moneyMax) || 1);
+    const moneyAvailable = Math.max(0, Number(server.moneyAvailable) || 0);
+    const minDifficulty = Math.max(1, Number(server.minDifficulty) || 1);
+    const hackDifficulty = Math.max(minDifficulty, Number(server.hackDifficulty) || minDifficulty);
+    const moneyRatio = Math.min(1, moneyAvailable / moneyMax);
+    const securityRatio = Math.min(1, minDifficulty / hackDifficulty);
+    return moneyRatio * securityRatio;
+}
+
+function getPreppedServer(ns, host) {
+    const server = ns.getServer(host);
+    server.moneyAvailable = server.moneyMax;
+    server.hackDifficulty = server.minDifficulty;
+    return server;
 }
 
 function getTargetLimit(xpMode, maxTargets) {
@@ -304,7 +376,7 @@ function getModePriority(mode, xpMode) {
 }
 
 function scheduleFleet(ns, rootedHosts, targets, opts) {
-    const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent, opts.xpMode, opts.maxTargets);
+    const targetPlans = buildTargetPlans(ns, targets, opts.hackPercent, opts.xpMode, opts.maxTargets, opts.planner);
     const result = allocateTargetsAcrossFleet(ns, rootedHosts, targetPlans, VERSION, opts);
     result.shareEnabled = shouldRunSharing(ns);
 
@@ -352,16 +424,20 @@ function getWorkerScript(mode) {
     return "ghost.hack.js";
 }
 
-function getNeededThreadsForMode(ns, target, mode, hackFraction) {
+function getNeededThreadsForMode(ns, target, mode, hackFraction, planner) {
     if (mode === "weaken") {
         return getNeededWeakenThreads(ns, target);
     }
 
     if (mode === "grow") {
-        return getNeededGrowThreads(ns, target);
+        return planner === "formulas"
+            ? getNeededGrowThreadsFormulas(ns, target)
+            : getNeededGrowThreads(ns, target);
     }
 
-    return getNeededHackThreads(ns, target, hackFraction);
+    return planner === "formulas"
+        ? getNeededHackThreadsFormulas(ns, target, hackFraction)
+        : getNeededHackThreads(ns, target, hackFraction);
 }
 
 function getNeededWeakenThreads(ns, target) {
@@ -400,6 +476,24 @@ function getNeededGrowThreads(ns, target) {
     }
 }
 
+function getNeededGrowThreadsFormulas(ns, target) {
+    try {
+        const player = ns.getPlayer();
+        const server = ns.getServer(target);
+        const moneyMax = Number(server.moneyMax) || 0;
+        const moneyAvailable = Number(server.moneyAvailable) || 0;
+
+        if (moneyMax <= 0 || moneyAvailable >= moneyMax) {
+            return 0;
+        }
+
+        const threads = ns.formulas.hacking.growThreads(server, player, moneyMax, 1);
+        return sanitizeThreadCount(threads);
+    } catch {
+        return getNeededGrowThreads(ns, target);
+    }
+}
+
 function getNeededHackThreads(ns, target, hackFraction) {
     const maxMoney = ns.getServerMaxMoney(target);
     const fraction = clampNumber(hackFraction, 0.01, 0.99, HACK_MONEY_FRACTION);
@@ -418,7 +512,31 @@ function getNeededHackThreads(ns, target, hackFraction) {
     }
 }
 
-function buildTargetPlans(ns, targets, hackPercent, xpMode, maxTargets) {
+function getNeededHackThreadsFormulas(ns, target, hackFraction) {
+    try {
+        const player = ns.getPlayer();
+        const server = ns.getServer(target);
+        const maxMoney = Number(server.moneyMax) || 0;
+        const moneyAvailable = Math.max(1, Number(server.moneyAvailable) || 0);
+        const fraction = clampNumber(hackFraction, 0.01, 0.99, HACK_MONEY_FRACTION);
+
+        if (maxMoney <= 0) {
+            return 0;
+        }
+
+        const percent = Math.max(0, ns.formulas.hacking.hackPercent(server, player));
+        if (percent <= 0) {
+            return 0;
+        }
+
+        const desiredHackAmount = Math.min(moneyAvailable, Math.max(1, maxMoney * fraction));
+        return sanitizeThreadCount(desiredHackAmount / (moneyAvailable * percent));
+    } catch {
+        return getNeededHackThreads(ns, target, hackFraction);
+    }
+}
+
+function buildTargetPlans(ns, targets, hackPercent, xpMode, maxTargets, planner) {
     const seen = new Set();
     const plans = [];
     const primaryTargetLimit = getTargetLimit(xpMode, maxTargets);
@@ -432,11 +550,11 @@ function buildTargetPlans(ns, targets, hackPercent, xpMode, maxTargets) {
 
         const mode = selectMode(ns, target);
         const script = getWorkerScript(mode);
-        const neededThreads = getNeededThreadsForMode(ns, target, mode, hackPercent);
+        const neededThreads = getNeededThreadsForMode(ns, target, mode, hackPercent, planner);
 
         if (neededThreads < 1) continue;
 
-        const score = scoreTarget(ns, target, xpMode);
+        const score = scoreTarget(ns, target, xpMode, planner);
         const primaryPriority = getModePriority(mode, xpMode) + (isPrimaryTarget ? 100 : 0);
         const weakenSupportThreads = getWeakenSupportThreads(ns, target, mode, neededThreads);
 
@@ -712,6 +830,16 @@ function getFreeRam(ns, host, reserveHomeRam) {
 }
 
 function getActionTime(ns, target, mode) {
+    if (hasFormulasAccess(ns)) {
+        try {
+            const player = ns.getPlayer();
+            const server = ns.getServer(target);
+            if (mode === "weaken") return ns.formulas.hacking.weakenTime(server, player);
+            if (mode === "grow") return ns.formulas.hacking.growTime(server, player);
+            return ns.formulas.hacking.hackTime(server, player);
+        } catch {}
+    }
+
     if (mode === "weaken") return ns.getWeakenTime(target);
     if (mode === "grow") return ns.getGrowTime(target);
     return ns.getHackTime(target);
