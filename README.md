@@ -1,6 +1,30 @@
 # bitburner-scripts
 My own Bitburner scripts
 
+## Market scripts
+
+`market.4s.js` is a 4S-only stock trader. It requires WSE, TIX, 4S Market Data, and 4S TIX API access. The first version is long-only and uses forecast thresholds with reserve-cash and per-position caps.
+
+Run it with:
+
+```text
+run market.4s.js
+run market.4s.js --once
+run market.4s.js --reserve-cash 50m --max-position-ratio 0.15
+```
+
+Supported flags:
+
+- `--once`: run one trading pass and exit.
+- `--interval <ms>`: delay between trading passes.
+- `--reserve-cash <amount>`: cash to keep untouched on `home`. Supports suffixes like `k`, `m`, `b`, and `t`.
+- `--max-position-ratio <0-1>`: maximum fraction of total equity to place into one symbol.
+- `--buy-forecast <0.5-0.99>`: minimum forecast to open a position.
+- `--sell-forecast <0.5-0.99>`: forecast threshold to exit a position.
+- `--min-volatility <n>`: ignore symbols below this volatility.
+- `--max-holdings <n>`: cap the number of concurrent long positions.
+- `--verbose <true|false>`: control per-pass status output.
+
 ## Ghost scripts
 
 `ghost.controller.js` is the fleet coordinator. It scans the network, roots hosts, syncs the ghost scripts, selects targets, and assigns `hack`, `grow`, `weaken`, and optional `share` work across available RAM.
@@ -85,7 +109,7 @@ Run it with:
 ```text
 run fleet.js
 run fleet.js --once
-run fleet.js --reserve-cash 5000000 --spend-ratio 0.5
+run fleet.js --reserve-cash 5m --spend-ratio 0.5
 ```
 
 Supported flags:
@@ -93,7 +117,7 @@ Supported flags:
 - `--interval <ms>`: polling interval between fleet management passes.
 - `--once`: run one pass and exit.
 - `--prefix <name>`: purchased server hostname prefix.
-- `--reserve-cash <amount>`: money to keep untouched on `home`.
+- `--reserve-cash <amount>`: money to keep untouched on `home`. Supports suffixes like `k`, `m`, `b`, and `t`.
 - `--pause-spare-ratio <0-1>`: pause buying or upgrades while too much purchased-server RAM is still free.
 - `--pause-spare-gb <gb>`: absolute free-RAM pause threshold.
 - `--spend-ratio <0-1>`: fraction of available post-reserve cash to spend.
@@ -107,11 +131,11 @@ Run it with:
 
 ```text
 run fleet.status.js
-run fleet.status.js --reserve-cash 5000000
+run fleet.status.js --reserve-cash 5m
 run fleet.status.js --sort free
 ```
 
 Supported flags:
 
-- `--reserve-cash <amount>`: money to exclude from upgrade and purchase readiness calculations.
+- `--reserve-cash <amount>`: money to exclude from upgrade and purchase readiness calculations. Supports suffixes like `k`, `m`, `b`, and `t`.
 - `--sort <ram|free|used|threads|name>`: sort the per-host listing.

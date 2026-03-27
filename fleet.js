@@ -20,7 +20,7 @@ export async function main(ns) {
     disableLogs(ns);
 
     const prefix = String(flags.prefix || "shade");
-    const reserveCash = Math.max(0, Number(flags["reserve-cash"]) || 0);
+    const reserveCash = Math.max(0, parseMoneyInput(flags["reserve-cash"], 0));
     const pauseSpareRatio = clampNumber(flags["pause-spare-ratio"], 0, 1, 0.25);
     const pauseSpareGb = Math.max(0, Number(flags["pause-spare-gb"]) || 0);
     const spendRatio = clampNumber(flags["spend-ratio"], 0.01, 1, 1);
@@ -419,6 +419,32 @@ function clampNumber(value, min, max, fallback) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return fallback;
     return Math.min(max, Math.max(min, numeric));
+}
+
+function parseMoneyInput(value, fallback) {
+    if (typeof value === "number") {
+        return Number.isFinite(value) ? value : fallback;
+    }
+
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (raw.length === 0) return fallback;
+
+    const match = raw.match(/^(-?\d+(?:\.\d+)?)([kmbt])?$/);
+    if (!match) return fallback;
+
+    const numeric = Number(match[1]);
+    if (!Number.isFinite(numeric)) return fallback;
+
+    const suffix = match[2] || "";
+    const multipliers = {
+        "": 1,
+        k: 1e3,
+        m: 1e6,
+        b: 1e9,
+        t: 1e12,
+    };
+
+    return numeric * (multipliers[suffix] || 1);
 }
 
 function formatMoney(ns, amount) {

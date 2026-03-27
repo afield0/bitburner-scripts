@@ -12,7 +12,7 @@ export async function main(ns) {
 
     disableLogs(ns);
 
-    const reserveCash = Math.max(0, Number(flags["reserve-cash"]) || 0);
+    const reserveCash = Math.max(0, parseMoneyInput(flags["reserve-cash"], 0));
     const purchased = ns.getPurchasedServers().sort();
     const decommissioned = getDecommissionedHosts(ns, purchased);
     const sortKey = String(flags.sort || "ram").toLowerCase();
@@ -232,6 +232,32 @@ function disableLogs(ns) {
         "read",
         "ps",
     ].forEach(fn => ns.disableLog(fn));
+}
+
+function parseMoneyInput(value, fallback) {
+    if (typeof value === "number") {
+        return Number.isFinite(value) ? value : fallback;
+    }
+
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (raw.length === 0) return fallback;
+
+    const match = raw.match(/^(-?\d+(?:\.\d+)?)([kmbt])?$/);
+    if (!match) return fallback;
+
+    const numeric = Number(match[1]);
+    if (!Number.isFinite(numeric)) return fallback;
+
+    const suffix = match[2] || "";
+    const multipliers = {
+        "": 1,
+        k: 1e3,
+        m: 1e6,
+        b: 1e9,
+        t: 1e12,
+    };
+
+    return numeric * (multipliers[suffix] || 1);
 }
 
 function formatMoney(ns, amount) {
