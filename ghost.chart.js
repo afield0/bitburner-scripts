@@ -16,7 +16,7 @@ export async function main(ns) {
 
     const playerLevel = ns.getHackingLevel();
     const network = discoverNetwork(ns, "home");
-    const rows = network
+    const rows = network.order
         .map(host => buildHostRow(ns, host, playerLevel, network.depths, network.parents))
         .filter(row => Boolean(flags.all) || row.hackable);
 
