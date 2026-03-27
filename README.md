@@ -25,6 +25,26 @@ Supported flags:
 - `--max-holdings <n>`: cap the number of concurrent long positions.
 - `--verbose <true|false>`: control per-pass status output.
 
+## Hacknet scripts
+
+`hacknet.js` manages Hacknet node purchases and upgrades, but only reinvests money that Hacknet has generated. It uses the game's Hacknet money-source accounting to cap spending instead of drawing from hacking, stock, or other profits.
+
+Run it with:
+
+```text
+run hacknet.js
+run hacknet.js --once
+run hacknet.js --spend-ratio 0.5 --max-nodes 8
+```
+
+Supported flags:
+
+- `--once`: run one management pass and exit.
+- `--interval <ms>`: delay between Hacknet management passes.
+- `--spend-ratio <0-1>`: fraction of cumulative Hacknet-generated money that may be reinvested.
+- `--max-nodes <n>`: cap the number of Hacknet nodes to own.
+- `--verbose <true|false>`: control per-pass status output.
+
 ## Ghost scripts
 
 `ghost.controller.js` is the fleet coordinator. It scans the network, roots hosts, syncs the ghost scripts, selects targets, and assigns `hack`, `grow`, `weaken`, and optional `share` work across available RAM.
