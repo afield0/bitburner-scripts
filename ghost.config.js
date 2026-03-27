@@ -24,5 +24,7 @@ export const RESERVED_HOME_RAM = 32;
 export const SECURITY_BUFFER = 5;
 export const MONEY_THRESHOLD = 0.90;
 export const HACK_MONEY_FRACTION = 0.10;
+export const MONEY_TARGET_LIMIT = 3;
+export const XP_TARGET_LIMIT = 1;
 
 export const CONTROLLER_INTERVAL = 5000;
